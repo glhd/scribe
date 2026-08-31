@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This project has no services, authentication, or other resume-time repairs.

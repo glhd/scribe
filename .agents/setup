@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+run_step() {
+  local label="$1"
+  shift
+  local started=$SECONDS
+
+  printf '\n==> %s\n' "$label"
+  "$@"
+  printf '<== %s (%ss)\n' "$label" "$((SECONDS - started))"
+}
+
+system_packages=(
+  build-essential
+  curl
+  file
+  libayatana-appindicator3-dev
+  librsvg2-dev
+  libssl-dev
+  libwebkit2gtk-4.1-dev
+  libxdo-dev
+  pkg-config
+  wget
+)
+missing_packages=()
+
+for package in "${system_packages[@]}"; do
+  if ! dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii '; then
+    missing_packages+=("$package")
+  fi
+done
+
+if ((${#missing_packages[@]})); then
+  run_step "Refresh apt metadata" sudo apt-get update
+  run_step "Install system dependencies" \
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+else
+  printf 'System dependencies are already installed.\n'
+fi
+
+# The orb's .bash_profile does not source .profile by default.
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1090
+  source "$HOME/.cargo/env"
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+  run_step "Install Rust" \
+    sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path"
+
+  # The installer cannot update this running process.
+  # shellcheck disable=SC1090
+  source "$HOME/.cargo/env"
+fi
+
+profile_marker="# scribe Rust toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# scribe Rust toolchain
+if [ -f "$HOME/.cargo/env" ]; then
+  . "$HOME/.cargo/env"
+fi
+EOF
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  printf 'Node.js is required but was not found in the orb base image.\n' >&2
+  exit 1
+fi
+
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (!((major === 20 && minor >= 19) || major >= 22)) { console.error(`Node.js ${process.versions.node} is unsupported; use 20.19+ or 22.12+.`); process.exit(1) }'
+
+run_step "Install npm dependencies" npm ci --no-audit --no-fund
+run_step "Fetch Rust dependencies" cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+
+printf '\nOrb setup complete.\n'
