@@ -141,4 +141,6 @@ publishes installers, signed updater bundles, and `latest.json` to the GitHub
 release. It requires the repository secret `TAURI_SIGNING_PRIVATE_KEY`; Apple
 signing and notarization secrets are optional, with ad-hoc signing used when
 they are absent. To notarize, configure the complete set `APPLE_CERTIFICATE`,
-`APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`.
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_ISSUER`, `APPLE_API_KEY`, and
+`APPLE_API_KEY_CONTENT`. The last secret contains the complete raw App Store
+Connect `.p8` private key; the workflow writes it to `APPLE_API_KEY_PATH`.

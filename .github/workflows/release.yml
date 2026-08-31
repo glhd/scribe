@@ -65,31 +65,34 @@ jobs:
         env:
           CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ACCOUNT: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+          API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
         run: |
           supplied=0
-          for value in "$CERTIFICATE" "$CERTIFICATE_PASSWORD" "$APPLE_ACCOUNT" "$APPLE_APP_PASSWORD" "$APPLE_TEAM"; do
+          for value in "$CERTIFICATE" "$CERTIFICATE_PASSWORD" "$API_ISSUER" "$API_KEY" "$API_KEY_CONTENT"; do
             if [[ -n "$value" ]]; then
               supplied=$((supplied + 1))
             fi
           done
 
           if [[ "$supplied" -ne 0 && "$supplied" -ne 5 ]]; then
-            echo "::error::Apple signing is only enabled when all five Apple secrets are configured."
+            echo "::error::Apple signing requires the certificate pair and all three App Store Connect API secrets."
             exit 1
           fi
 
           if [[ "$supplied" -eq 0 ]]; then
             echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
           else
+            key_path="$RUNNER_TEMP/AuthKey_${API_KEY}.p8"
+            umask 077
+            printf '%s\n' "$API_KEY_CONTENT" > "$key_path"
             {
               printf 'APPLE_CERTIFICATE=%s\n' "$CERTIFICATE"
               printf 'APPLE_CERTIFICATE_PASSWORD=%s\n' "$CERTIFICATE_PASSWORD"
-              printf 'APPLE_ID=%s\n' "$APPLE_ACCOUNT"
-              printf 'APPLE_PASSWORD=%s\n' "$APPLE_APP_PASSWORD"
-              printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM"
+              printf 'APPLE_API_ISSUER=%s\n' "$API_ISSUER"
+              printf 'APPLE_API_KEY=%s\n' "$API_KEY"
+              printf 'APPLE_API_KEY_PATH=%s\n' "$key_path"
             } >> "$GITHUB_ENV"
           fi
 
