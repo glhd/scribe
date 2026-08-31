@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+*.jsonl.lock
+*.jsonl.tmp-*
 
 # Editor directories and files
 .vscode/*

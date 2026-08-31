@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "scribe",
+  "productName": "Scribe",
   "version": "0.1.0",
   "identifier": "org.glhd.scribe",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "scribe",
-        "width": 800,
-        "height": 600
+        "title": "Scribe",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600
       }
     ],
     "security": {
