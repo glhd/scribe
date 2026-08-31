@@ -308,6 +308,7 @@ function renderBlock(
   return <hr key={block.key} />;
 }
 
+/** Renders parsed planning notes without injecting raw HTML. */
 export function MarkdownDocument({
   document,
   highlights,

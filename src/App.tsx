@@ -12,7 +12,7 @@ import {
   InlineMarkdown,
   MarkdownDocument,
   type HighlightMap,
-} from "./Markdown";
+} from "./MarkdownView";
 import {
   parseMarkdown,
   resolveDocumentReference,
