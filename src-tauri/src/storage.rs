@@ -501,11 +501,12 @@ pub fn make_message(
         return Err("message text cannot be empty".to_string());
     }
 
-    let mut specs: Vec<(String, Option<u32>, Option<u32>)> = explicit_files
+    let explicit_specs: Vec<(String, Option<u32>, Option<u32>)> = explicit_files
         .iter()
         .map(|spec| parse_file_spec(spec))
         .collect::<Result<_, _>>()?;
-    for spec in inferred_file_specs(&text) {
+    let mut specs = Vec::new();
+    for spec in explicit_specs.into_iter().chain(inferred_file_specs(&text)) {
         if !specs.contains(&spec) {
             specs.push(spec);
         }

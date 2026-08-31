@@ -22,6 +22,7 @@ system_packages=(
   libxdo-dev
   pkg-config
   wget
+  xdg-utils
 )
 missing_packages=()
 
