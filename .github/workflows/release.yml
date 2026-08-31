@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            platform: macos-latest
+            args: --target universal-apple-darwin
+          - name: Linux x86-64
+            platform: ubuntu-22.04
+            args: ""
+          - name: Windows x86-64
+            platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            xdg-utils
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ACCOUNT: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          supplied=0
+          for value in "$CERTIFICATE" "$CERTIFICATE_PASSWORD" "$APPLE_ACCOUNT" "$APPLE_APP_PASSWORD" "$APPLE_TEAM"; do
+            if [[ -n "$value" ]]; then
+              supplied=$((supplied + 1))
+            fi
+          done
+
+          if [[ "$supplied" -ne 0 && "$supplied" -ne 5 ]]; then
+            echo "::error::Apple signing is only enabled when all five Apple secrets are configured."
+            exit 1
+          fi
+
+          if [[ "$supplied" -eq 0 ]]; then
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+          else
+            {
+              printf 'APPLE_CERTIFICATE=%s\n' "$CERTIFICATE"
+              printf 'APPLE_CERTIFICATE_PASSWORD=%s\n' "$CERTIFICATE_PASSWORD"
+              printf 'APPLE_ID=%s\n' "$APPLE_ACCOUNT"
+              printf 'APPLE_PASSWORD=%s\n' "$APPLE_APP_PASSWORD"
+              printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Scribe v__VERSION__
+          releaseBody: Download the installer for your platform below. Future releases update automatically.
+          releaseDraft: false
+          prerelease: false
+          updaterJsonPreferNsis: true
+          updaterJsonKeepUniversal: true
+          args: ${{ matrix.args }}

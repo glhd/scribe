@@ -13,6 +13,7 @@ use std::{
 use model::{AppSnapshot, DecisionStatus, DocumentReference, MessageKind};
 use storage::SessionPaths;
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
 
 struct RuntimeState {
     session: Result<SessionPaths, String>,
@@ -149,11 +150,46 @@ fn start_watcher(app: tauri::AppHandle, session: SessionPaths) {
     });
 }
 
+fn start_updater(app: tauri::AppHandle) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let updater = match app.updater() {
+            Ok(updater) => updater,
+            Err(error) => {
+                eprintln!("cannot initialize automatic updates: {error}");
+                return;
+            }
+        };
+        let update = match updater.check().await {
+            Ok(Some(update)) => update,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("cannot check for updates: {error}");
+                return;
+            }
+        };
+
+        if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
+            eprintln!("cannot install update: {error}");
+            return;
+        }
+
+        // The Windows installer exits and relaunches Scribe itself. macOS and
+        // Linux replace the app in place and need the running process restarted.
+        #[cfg(not(target_os = "windows"))]
+        app.restart();
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let session = storage::resolve_session();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(RuntimeState {
             session,
             update_guard: Mutex::new(()),
@@ -172,6 +208,7 @@ pub fn run() {
                 }
                 start_watcher(app.handle().clone(), session);
             }
+            start_updater(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

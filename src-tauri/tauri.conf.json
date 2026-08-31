@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Scribe",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "identifier": "org.glhd.scribe",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -33,5 +34,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/glhd/scribe/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFNzZBOUU3NDBGNDY2NzgKUldSNFp2UkE1NmwyN2dvK2hnUkw3dW5RSnJCK0VWWmVpNWkyLy94T0N3MjBwSWl1WWI0VXN4QWUK"
+    }
   }
 }

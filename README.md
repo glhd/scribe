@@ -52,6 +52,10 @@ Build the distributable app with `npm run tauri build`. The resulting `scribe`
 executable is both the desktop entry point and the CLI: with no subcommand it
 opens the window; with a subcommand it writes the sidecars directly.
 
+Release builds check the latest GitHub release on startup. When a newer signed
+version exists, Scribe downloads and installs it automatically, then relaunches
+on macOS and Linux. The Windows installer handles its own relaunch.
+
 ## CLI
 
 ```bash
@@ -127,3 +131,14 @@ merge these records by `timestamp` with speech and IDE events, and persist its
 event cursor in the existing state directory. A `reference_stale` record calls
 for `scribe unlink`; decision records call for updating the matching markdown
 entry's `**Status:**` line.
+
+## Releases
+
+Versions are kept in `package.json`, `src-tauri/Cargo.toml`, and
+`src-tauri/tauri.conf.json`. Pushing a matching `v<version>` tag runs the release
+workflow for macOS (universal), Linux x86-64, and Windows x86-64. The workflow
+publishes installers, signed updater bundles, and `latest.json` to the GitHub
+release. It requires the repository secret `TAURI_SIGNING_PRIVATE_KEY`; Apple
+signing and notarization secrets are optional, with ad-hoc signing used when
+they are absent. To notarize, configure the complete set `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`.
