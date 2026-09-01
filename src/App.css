@@ -1789,6 +1789,13 @@ button.document-reference:hover,
   color: var(--brand);
 }
 
+.document-reference.is-stale,
+.document-reference.is-stale .reference-heading,
+.document-reference.is-stale .reference-snippet,
+.document-reference.is-stale .stale-label {
+  color: var(--muted);
+}
+
 .source-status-strip {
   min-height: 39px;
   border-top: 1px solid var(--line);
