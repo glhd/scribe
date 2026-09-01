@@ -20,6 +20,7 @@ import {
   type ParsedMarkdown,
   type ResolvedDocumentReference,
 } from "./markdown";
+import scribeIcon from "../src-tauri/icons/128x128.png";
 import type {
   ChatMessage,
   DecisionStatus,
@@ -171,14 +172,14 @@ function restoreMarkdownScroll(
   scroller.scrollTop = range * saved.ratio;
 }
 
-function ScribeMark() {
+function AppIcon({ className }: { className: string }) {
   return (
-    <svg aria-hidden="true" className="scribe-mark" viewBox="0 0 32 32">
-      <path d="M8 6.5h13.5a4 4 0 0 1 4 4V24H12a4 4 0 0 1-4-4V6.5Z" />
-      <path d="M12 11h9M12 15h9M12 19h5.5" />
-      <path d="m5.5 23 3.2-1.2L6.6 19l-1.1 4Z" />
-    </svg>
+    <img alt="" aria-hidden="true" className={className} src={scribeIcon} />
   );
+}
+
+function WindowDragRegion() {
+  return <div aria-hidden="true" className="window-drag-region" data-tauri-drag-region />;
 }
 
 function ArrowIcon() {
@@ -339,7 +340,7 @@ function MessageCard({
 function LoadingShell() {
   return (
     <div aria-busy="true" aria-label="Loading Scribe" className="loading-state">
-      <span className="loading-mark"><ScribeMark /></span>
+      <AppIcon className="loading-mark" />
       <strong>Opening Scribe</strong>
       <span>Loading notes and messages…</span>
     </div>
@@ -350,20 +351,34 @@ function SourceStrip({ sources }: { sources: SourceHealth[] }) {
   return (
     <div aria-label="Session sources" className="source-status-strip" role="status">
       {sources.map((source) => (
-        <span className={`source-status is-${source.status}`} key={source.source} title={source.detail ?? undefined}>
+        <span
+          className={`source-status is-${source.status}`}
+          key={source.source}
+          title={source.detail ?? undefined}
+        >
           <span className="source-name">{source.source}</span>
           <span aria-hidden="true" className="source-dot" />
-          <span>{source.label}</span>
+          <span className="source-label">{source.label}</span>
         </span>
       ))}
     </div>
   );
 }
 
-function sessionLabel(session: SessionSummary): string {
+function sessionTime(session: SessionSummary): { short: string; full: string } {
   const date = new Date(session.startedAt);
-  const when = Number.isNaN(date.getTime()) ? session.startedAt : date.toLocaleString();
-  return `${when} · ${session.state}`;
+  if (Number.isNaN(date.getTime())) {
+    return { short: session.startedAt, full: session.startedAt };
+  }
+  return {
+    short: date.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    full: date.toLocaleString(),
+  };
+}
+
+function sessionName(session: SessionSummary): string {
+  const path = session.attachedRepo?.replace(/[\\/]$/, "");
+  return path?.split(/[\\/]/).pop() || "Planning session";
 }
 
 function SessionHistory({
@@ -380,29 +395,52 @@ function SessionHistory({
   if (sessions.length === 0) return null;
   return (
     <details className="history-menu">
-      <summary>History</summary>
+      <summary aria-label="Show session history">History</summary>
       <div className="history-popover">
-        <strong>Recent sessions</strong>
-        {sessions.map((session) => (
-          <div className={session.id === currentId ? "history-row is-current" : "history-row"} key={session.id}>
-            <button onClick={() => onSelect(session.id)} type="button">
-              <span>{sessionLabel(session)}</span>
-              <code>{session.id}</code>
-              {session.hasUnsavedHandoff && <em>Unsaved handoff</em>}
-            </button>
-            {(session.state === "complete" || session.state === "interrupted") && (
-              <button
-                aria-label={`Delete session ${session.id}`}
-                className="history-delete"
-                onClick={() => onDelete(session.id)}
-                title="Delete Scribe-owned session data"
-                type="button"
+        <header className="popover-heading">
+          <strong>History</strong>
+          <span>Recent planning sessions.</span>
+        </header>
+        <div className="history-list" role="list">
+          {sessions.map((session) => {
+            const time = sessionTime(session);
+            return (
+              <div
+                className={session.id === currentId ? "history-row is-current" : "history-row"}
+                key={session.id}
+                role="listitem"
               >
-                ×
-              </button>
-            )}
-          </div>
-        ))}
+                <button
+                  aria-label={`Open ${sessionName(session)}, ${session.state}, ${time.full}`}
+                  onClick={() => onSelect(session.id)}
+                  type="button"
+                >
+                  <span className="history-row-heading">
+                    <strong>{sessionName(session)}</strong>
+                    <time dateTime={session.startedAt} title={time.full}>{time.short}</time>
+                  </span>
+                  <span className="history-row-meta">
+                    <span className={`session-state is-${session.state}`}>{session.state}</span>
+                    {session.hasUnsavedHandoff && <em>Unsaved handoff</em>}
+                    {session.dataPruned && <span>Details expired</span>}
+                  </span>
+                  <code>{session.id}</code>
+                </button>
+                {(session.state === "complete" || session.state === "interrupted") && (
+                  <button
+                    aria-label={`Delete session ${session.id}`}
+                    className="history-delete"
+                    onClick={() => onDelete(session.id)}
+                    title="Delete Scribe-owned session data"
+                    type="button"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </details>
   );
@@ -421,11 +459,22 @@ function ChronicleSettings({
 }) {
   return (
     <details className="settings-menu">
-      <summary>Sources</summary>
+      <summary aria-label="Show source settings">Sources</summary>
       <div className="settings-popover">
-        <strong>Chronicle</strong>
-        <span>{found ? "Registry detected" : "Registry not detected"}</span>
-        <code title={root}>{root}</code>
+        <header className="popover-heading">
+          <strong>Sources</strong>
+          <span>Chronicle is optional.</span>
+        </header>
+        <dl className="source-settings">
+          <div>
+            <dt>Chronicle</dt>
+            <dd>{found ? "Registry detected" : "Registry not detected"}</dd>
+          </div>
+          <div>
+            <dt>Folder</dt>
+            <dd><code title={root}>{root}</code></dd>
+          </div>
+        </dl>
         <button disabled={choosing} onClick={onChoose} type="button">
           {choosing ? "Choosing…" : "Choose Chronicle folder…"}
         </button>
@@ -443,7 +492,7 @@ function ChronicleFolderNotice({
 }) {
   return (
     <div className="chronicle-folder-notice" role="status">
-      <span>Chronicle registry not detected. Chronicle is optional.</span>
+      <span><strong>Chronicle is off.</strong> No registry was detected.</span>
       <button disabled={choosing} onClick={onChoose} type="button">
         {choosing ? "Choosing…" : "Choose Chronicle folder"}
       </button>
@@ -473,32 +522,44 @@ function WaitingForCall({
   const sourceError = state.sources.find((source) => source.status === "error");
   return (
     <main className="app-shell app-centered waiting-shell">
-      <div className="waiting-card">
-        <span className="loading-mark"><ScribeMark /></span>
-        <h1>Waiting for a Tuple call…</h1>
-        <p>Join a call in Tuple. Scribe will detect it automatically; start transcription in Tuple when you’re ready.</p>
-        <SourceStrip sources={state.sources} />
-        {!state.chronicleRegistryFound && (
-          <ChronicleFolderNotice choosing={choosingChronicle} onChoose={onChooseChronicle} />
-        )}
-        {(error || sourceError?.detail) && (
-          <div className="waiting-error" role="alert">{error || sourceError?.detail}</div>
-        )}
-        {!state.integrationInstalled && (
-          <button className="primary-action" disabled={installing} onClick={onInstall} type="button">
-            {installing ? "Installing…" : "Install Claude integration"}
-          </button>
-        )}
-        {state.sessions.length > 0 && (
-          <div className="waiting-history">
-            <span>Or resume a recent Scribe session</span>
+      <WindowDragRegion />
+      <header className="waiting-titlebar">
+        <h1>Scribe</h1>
+        <div className="header-actions">
+          <ChronicleSettings
+            choosing={choosingChronicle}
+            found={state.chronicleRegistryFound}
+            onChoose={onChooseChronicle}
+            root={state.chronicleRoot}
+          />
+          {state.sessions.length > 0 && (
             <SessionHistory
               sessions={state.sessions}
               onDelete={onDelete}
               onSelect={onSelect}
             />
-          </div>
-        )}
+          )}
+        </div>
+      </header>
+      <div className="waiting-content">
+        <section aria-labelledby="waiting-title" className="waiting-card">
+          <AppIcon className="waiting-mark" />
+          <span className="waiting-eyebrow">Tuple call companion</span>
+          <h2 id="waiting-title">Waiting for a Tuple call</h2>
+          <p>Join a call in Tuple and Scribe will detect it automatically. Start transcription in Tuple when you’re ready.</p>
+          <SourceStrip sources={state.sources} />
+          {!state.chronicleRegistryFound && (
+            <ChronicleFolderNotice choosing={choosingChronicle} onChoose={onChooseChronicle} />
+          )}
+          {(error || sourceError?.detail) && (
+            <div className="waiting-error" role="alert">{error || sourceError?.detail}</div>
+          )}
+          {!state.integrationInstalled && (
+            <button className="primary-action" disabled={installing} onClick={onInstall} type="button">
+              {installing ? "Installing…" : "Install Claude integration"}
+            </button>
+          )}
+        </section>
       </div>
     </main>
   );
@@ -804,12 +865,13 @@ function App() {
   }, [savingNotes, state?.sessionId]);
 
   if (loading && !state) {
-    return <main className="app-shell app-centered"><LoadingShell /></main>;
+    return <main className="app-shell app-centered"><WindowDragRegion /><LoadingShell /></main>;
   }
 
   if (!state) {
     return (
       <main className="app-shell app-centered">
+        <WindowDragRegion />
         <div className="fatal-error" role="alert">
           <span aria-hidden="true">!</span>
           <h1>Scribe couldn’t open</h1>
@@ -835,8 +897,9 @@ function App() {
     );
   }
 
-  const sourceWarning = state.sources.find((source) =>
-    ["stopped", "error", "ambiguous"].includes(source.status),
+  const sourceDetails = state.sources.filter(
+    (source) =>
+      source.detail && ["stopped", "error", "ambiguous"].includes(source.status),
   );
   const modeNotice =
     state.mode === "waitingTranscription"
@@ -859,39 +922,15 @@ function App() {
   const planReady = state.mode === "complete" || state.mode === "interrupted";
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell mode-${state.mode}`}>
+      <WindowDragRegion />
       <section aria-label="Scribe messages" className="chat-pane">
         <header className="app-header">
-          <div className="brand-lockup">
-            <ScribeMark />
-            <div>
-              <h1>Scribe</h1>
-              <span>Review stream</span>
-            </div>
+          <div className="sidebar-heading">
+            <h1>Review</h1>
+            <span>{planReady ? "Session complete" : "Claude’s stream"}</span>
           </div>
           <div className="header-actions">
-            {!state.integrationInstalled && (
-              <button
-                className="integration-button"
-                disabled={installingIntegration}
-                onClick={installIntegration}
-                type="button"
-              >
-                {installingIntegration ? "Installing…" : "Install Claude integration"}
-              </button>
-            )}
-            <ChronicleSettings
-              choosing={choosingChronicle}
-              found={state.chronicleRegistryFound}
-              onChoose={chooseChronicleFolder}
-              root={state.chronicleRoot}
-            />
-            <SessionHistory
-              currentId={state.sessionId}
-              onDelete={deleteSession}
-              onSelect={selectSession}
-              sessions={state.sessions}
-            />
             {unreadCount > 0 && (
               <span
                 aria-label={`${unreadCount} unread messages`}
@@ -904,18 +943,53 @@ function App() {
           </div>
         </header>
 
-        <SourceStrip sources={state.sources} />
+        {!state.integrationInstalled && (
+          <div className="integration-notice" role="status">
+            <span><strong>Claude integration is not installed.</strong> Install it once for future sessions.</span>
+            <button
+              disabled={installingIntegration}
+              onClick={installIntegration}
+              type="button"
+            >
+              {installingIntegration ? "Installing…" : "Install"}
+            </button>
+          </div>
+        )}
 
         {!state.chronicleRegistryFound && (
           <ChronicleFolderNotice choosing={choosingChronicle} onChoose={chooseChronicleFolder} />
         )}
 
-        {(actionError || liveWarning || modeNotice || sourceWarning?.detail) && (
+        {(actionError || liveWarning) && (
           <div className="warning-banner" role="alert">
-            <span>{actionError || liveWarning || sourceWarning?.detail || modeNotice}</span>
+            <span>{actionError || liveWarning}</span>
             {actionError && (
               <button aria-label="Dismiss error" onClick={() => setActionError(null)} type="button">×</button>
             )}
+          </div>
+        )}
+
+        {sourceDetails.length > 0 && (
+          <div
+            className={`source-detail-banner ${
+              sourceDetails.every((source) => source.status === "ambiguous")
+                ? "is-ambiguous"
+                : "is-error"
+            }`}
+            role="alert"
+          >
+            {sourceDetails.map((source) => (
+              <span key={source.source}>
+                <strong>{source.source}</strong>
+                {source.detail}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {modeNotice && (
+          <div className={`mode-banner is-${state.mode}`} role="status">
+            {modeNotice}
           </div>
         )}
 
@@ -955,7 +1029,23 @@ function App() {
           )}
         </div>
 
+        <SourceStrip sources={state.sources} />
+
         <footer className="read-toolbar">
+          <div className="sidebar-tools">
+            <ChronicleSettings
+              choosing={choosingChronicle}
+              found={state.chronicleRegistryFound}
+              onChoose={chooseChronicleFolder}
+              root={state.chronicleRoot}
+            />
+            <SessionHistory
+              currentId={state.sessionId}
+              onDelete={deleteSession}
+              onSelect={selectSession}
+              sessions={state.sessions}
+            />
+          </div>
           <button
             aria-label={
               unreadCount > 0
@@ -974,11 +1064,11 @@ function App() {
         </footer>
       </section>
 
-      <section aria-label="Live notes" className="notes-pane">
+      <section aria-label={planReady ? "Planning handoff" : "Live notes"} className="notes-pane">
         <header className="notes-header">
-          <div>
-            <span className="section-label">{planReady ? "Plan ready" : "Live notes"}</span>
+          <div className="notes-title">
             <h2>Planning handoff</h2>
+            <span className="section-label">{planReady ? "Plan ready" : "Live notes"}</span>
           </div>
           {planReady ? (
             <div className="handoff-actions">
