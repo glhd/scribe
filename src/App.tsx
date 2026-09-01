@@ -1,4 +1,5 @@
 import {
+  type CSSProperties,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -48,6 +49,29 @@ const timeFormatter = new Intl.DateTimeFormat(undefined, {
   hour: "numeric",
   minute: "2-digit",
 });
+const MIN_CHAT_PANE_WIDTH = 320;
+const MIN_NOTES_PANE_WIDTH = 320;
+const PANE_DIVIDER_LAYOUT_WIDTH = 1;
+const PANE_RESIZE_STEP = 16;
+
+function maximumChatPaneWidth(containerWidth: number): number {
+  return Math.max(
+    MIN_CHAT_PANE_WIDTH,
+    containerWidth - MIN_NOTES_PANE_WIDTH - PANE_DIVIDER_LAYOUT_WIDTH,
+  );
+}
+
+function constrainChatPaneWidth(width: number, containerWidth: number): number {
+  return Math.min(
+    maximumChatPaneWidth(containerWidth),
+    Math.max(MIN_CHAT_PANE_WIDTH, width),
+  );
+}
+
+function defaultChatPaneWidth(viewportWidth: number): number {
+  if (viewportWidth <= 980) return MIN_CHAT_PANE_WIDTH;
+  return Math.min(420, Math.max(MIN_CHAT_PANE_WIDTH, viewportWidth * 0.34));
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -184,6 +208,72 @@ function WindowTitlebar() {
     <div aria-hidden="true" className="window-titlebar" data-tauri-drag-region>
       <span data-tauri-drag-region>Scribe</span>
     </div>
+  );
+}
+
+function PaneResizer({
+  width,
+  onResize,
+}: {
+  width: number;
+  onResize: (width: number) => void;
+}) {
+  const [resizing, setResizing] = useState(false);
+
+  const resizeFromPointer = (clientX: number, divider: HTMLDivElement) => {
+    const bounds = divider.parentElement?.getBoundingClientRect();
+    if (bounds) onResize(constrainChatPaneWidth(clientX - bounds.left, bounds.width));
+  };
+
+  return (
+    <div
+      aria-controls="scribe-messages planning-handoff"
+      aria-label="Resize review and planning panes"
+      aria-orientation="vertical"
+      aria-valuemax={maximumChatPaneWidth(window.innerWidth)}
+      aria-valuemin={MIN_CHAT_PANE_WIDTH}
+      aria-valuenow={Math.round(width)}
+      aria-valuetext={`${Math.round(width)} pixels for Review`}
+      className={`pane-resizer${resizing ? " is-resizing" : ""}`}
+      onKeyDown={(event) => {
+        const containerWidth = event.currentTarget.parentElement?.clientWidth ?? window.innerWidth;
+        let nextWidth: number | undefined;
+        if (event.key === "ArrowLeft") nextWidth = width - PANE_RESIZE_STEP;
+        if (event.key === "ArrowRight") nextWidth = width + PANE_RESIZE_STEP;
+        if (event.key === "Home") nextWidth = MIN_CHAT_PANE_WIDTH;
+        if (event.key === "End") nextWidth = maximumChatPaneWidth(containerWidth);
+        if (nextWidth === undefined) return;
+        event.preventDefault();
+        onResize(constrainChatPaneWidth(nextWidth, containerWidth));
+      }}
+      onLostPointerCapture={() => setResizing(false)}
+      onPointerCancel={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        setResizing(false);
+      }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setResizing(true);
+        resizeFromPointer(event.clientX, event.currentTarget);
+      }}
+      onPointerMove={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          resizeFromPointer(event.clientX, event.currentTarget);
+        }
+      }}
+      onPointerUp={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        setResizing(false);
+      }}
+      role="separator"
+      tabIndex={0}
+    />
   );
 }
 
@@ -618,6 +708,7 @@ function WaitingForCall({
 function App() {
   const [state, setState] = useState<ScribeState | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [chatPaneWidth, setChatPaneWidth] = useState(() => defaultChatPaneWidth(window.innerWidth));
   const [loading, setLoading] = useState(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [liveWarning, setLiveWarning] = useState<string | null>(null);
@@ -643,6 +734,14 @@ function App() {
 
   useEffect(() => {
     document.title = "Scribe";
+  }, []);
+
+  useEffect(() => {
+    const fitPanesToWindow = () => {
+      setChatPaneWidth((width) => constrainChatPaneWidth(width, window.innerWidth));
+    };
+    window.addEventListener("resize", fitPanesToWindow);
+    return () => window.removeEventListener("resize", fitPanesToWindow);
   }, []);
 
   useEffect(() => {
@@ -1028,9 +1127,12 @@ function App() {
   const planReady = state.mode === "complete" || state.mode === "interrupted";
 
   return (
-    <main className={`app-shell mode-${state.mode}`}>
+    <main
+      className={`app-shell mode-${state.mode}`}
+      style={{ "--chat-pane-width": `${chatPaneWidth}px` } as CSSProperties}
+    >
       <WindowTitlebar />
-      <section aria-label="Scribe messages" className="chat-pane">
+      <section aria-label="Scribe messages" className="chat-pane" id="scribe-messages">
         <header className="app-header" data-tauri-drag-region>
           <div className="sidebar-heading" data-tauri-drag-region>
             <h1 data-tauri-drag-region>Review</h1>
@@ -1171,7 +1273,13 @@ function App() {
         </footer>
       </section>
 
-      <section aria-label={planReady ? "Planning handoff" : "Live notes"} className="notes-pane">
+      <PaneResizer onResize={setChatPaneWidth} width={chatPaneWidth} />
+
+      <section
+        aria-label={planReady ? "Planning handoff" : "Live notes"}
+        className="notes-pane"
+        id="planning-handoff"
+      >
         <header className="notes-header" data-tauri-drag-region>
           <div className="notes-title" data-tauri-drag-region>
             <h2 data-tauri-drag-region>Planning handoff</h2>
