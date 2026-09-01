@@ -251,6 +251,9 @@ pub fn ensure_current_session(store: &Store, tuple: &TupleClient) -> Result<Sess
 pub fn collect_once(store: &Store, tuple: &TupleClient, timeout: &str) -> Result<(), String> {
     let current_call = tuple.current_call();
     let mut session = store.current_session()?;
+    if current_call.is_ok() {
+        store.set_tuple_discovery_error(None)?;
+    }
     match current_call {
         Ok(Some(call_id)) => {
             if session.as_ref().map(|item| item.id.as_str()) != Some(call_id.as_str()) {
@@ -276,6 +279,7 @@ pub fn collect_once(store: &Store, tuple: &TupleClient, timeout: &str) -> Result
             if let Some(active) = &session {
                 store.set_source_state(&active.id, "tuple", "error", Some(&error), None)?;
             } else {
+                store.set_tuple_discovery_error(Some(&error))?;
                 return Err(error);
             }
         }
@@ -1319,6 +1323,28 @@ exit 1
             .as_deref()
             .unwrap()
             .contains("stopped during the call"));
+    }
+
+    #[test]
+    fn missing_tuple_cli_is_visible_while_waiting_for_a_call() {
+        let test = TestDirectory::new();
+        let store = Store::open_at(test.0.join("scribe")).unwrap();
+        let tuple = TupleClient::new(test.0.join("missing-tuple"));
+
+        assert!(collect_once(&store, &tuple, "1ms").is_err());
+
+        let snapshot = store.snapshot().unwrap();
+        let tuple = snapshot
+            .sources
+            .iter()
+            .find(|source| source.source == "tuple")
+            .unwrap();
+        assert_eq!(tuple.status, "error");
+        assert!(tuple
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("Install it from Tuple Settings"));
     }
 
     fn fixture_candidate() -> ChronicleCandidate {

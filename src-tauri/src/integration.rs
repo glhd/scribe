@@ -22,13 +22,24 @@ fn install_at(
     install_shim(executable, &shim)?;
 
     let skill = home.join(".claude/skills/planning-scribe/SKILL.md");
-    if let Ok(existing) = fs::read_to_string(&skill) {
-        if !existing.contains(MANAGED_MARKER) {
+    let existing = match fs::read_to_string(&skill) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
             return Err(format!(
-                "{} already exists and is not managed by Scribe; move it aside before installing",
+                "cannot inspect the existing planning-scribe skill at {}: {error}",
                 skill.display()
             ));
         }
+    };
+    if existing.is_some_and(|content| !content.contains(MANAGED_MARKER)) {
+        let backup = skill.with_file_name(format!("SKILL.md.before-scribe-{}", Uuid::new_v4()));
+        fs::copy(&skill, &backup).map_err(|error| {
+            format!(
+                "cannot back up the existing planning-scribe skill to {}: {error}",
+                backup.display()
+            )
+        })?;
     }
     let content = SKILL_TEMPLATE.replace("{{SCRIBE_BIN}}", &shim.to_string_lossy());
     write_atomic(&skill, content.as_bytes())?;
@@ -113,6 +124,37 @@ mod tests {
         let content = fs::read_to_string(skill).unwrap();
         assert!(content.contains(MANAGED_MARKER));
         assert!(content.contains(&shim.to_string_lossy().to_string()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installer_backs_up_an_existing_unmanaged_skill() {
+        let root = env::temp_dir().join(format!("scribe-integration-test-{}", Uuid::new_v4()));
+        let store = Store::open_at(root.join("data")).unwrap();
+        let executable = root.join("Scribe");
+        let skill_directory = root.join("home/.claude/skills/planning-scribe");
+        fs::create_dir_all(&skill_directory).unwrap();
+        fs::write(&executable, "test executable").unwrap();
+        fs::write(skill_directory.join("SKILL.md"), "original skill").unwrap();
+
+        let skill = install_at(&store, &executable, &root.join("home")).unwrap();
+
+        assert!(fs::read_to_string(skill).unwrap().contains(MANAGED_MARKER));
+        let backups = fs::read_dir(skill_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("SKILL.md.before-scribe-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            fs::read_to_string(backups[0].path()).unwrap(),
+            "original skill"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

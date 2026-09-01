@@ -247,6 +247,38 @@ impl Store {
         Ok(root)
     }
 
+    pub fn set_tuple_discovery_error(&self, error: Option<&str>) -> Result<(), String> {
+        let connection = self.connection()?;
+        match error {
+            Some(error) => connection
+                .execute(
+                    "INSERT INTO settings (key, value) VALUES ('tuple_discovery_error', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![error],
+                )
+                .map(|_| ())
+                .map_err(db_error),
+            None => connection
+                .execute(
+                    "DELETE FROM settings WHERE key = 'tuple_discovery_error'",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(db_error),
+        }
+    }
+
+    fn tuple_discovery_error(&self) -> Result<Option<String>, String> {
+        self.connection()?
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'tuple_discovery_error'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)
+    }
+
     pub fn session_end(&self, session_id: &str) -> Result<Option<String>, String> {
         let value = self
             .connection()?
@@ -1067,6 +1099,7 @@ impl Store {
         let chronicle_root = self.chronicle_root()?;
         let chronicle_registry_found = chronicle_root.join("sessions.json").is_file();
         let Some(session) = session else {
+            let tuple_error = self.tuple_discovery_error()?;
             return Ok(AppSnapshot {
                 mode: AppMode::WaitingCall,
                 session_id: None,
@@ -1078,8 +1111,12 @@ impl Store {
                 sources: vec![
                     health(
                         "tuple",
-                        "waiting",
-                        Some("Waiting for a Tuple call…".to_string()),
+                        if tuple_error.is_some() {
+                            "error"
+                        } else {
+                            "waiting"
+                        },
+                        tuple_error.or_else(|| Some("Waiting for a Tuple call…".to_string())),
                     ),
                     health("claude", "waiting", None),
                     health("chronicle", "off", None),

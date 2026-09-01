@@ -470,6 +470,7 @@ function WaitingForCall({
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
+  const sourceError = state.sources.find((source) => source.status === "error");
   return (
     <main className="app-shell app-centered waiting-shell">
       <div className="waiting-card">
@@ -480,7 +481,9 @@ function WaitingForCall({
         {!state.chronicleRegistryFound && (
           <ChronicleFolderNotice choosing={choosingChronicle} onChoose={onChooseChronicle} />
         )}
-        {error && <div className="waiting-error" role="alert">{error}</div>}
+        {(error || sourceError?.detail) && (
+          <div className="waiting-error" role="alert">{error || sourceError?.detail}</div>
+        )}
         {!state.integrationInstalled && (
           <button className="primary-action" disabled={installing} onClick={onInstall} type="button">
             {installing ? "Installing…" : "Install Claude integration"}

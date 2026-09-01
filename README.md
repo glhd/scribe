@@ -16,7 +16,9 @@ chooses **Save As…** for a finished handoff.
    transcription. If transcription stops during a call, Scribe reports the gap.
 3. On first use, choose **Install Claude integration**. This installs the
    `planning-scribe` skill and a stable CLI shim at `~/.scribe/bin/scribe`; no
-   shell `PATH` edits are needed.
+   shell `PATH` edits are needed. If a user-managed `planning-scribe` skill is
+   already present, Scribe backs it up beside `SKILL.md` before installing its
+   managed version.
 4. Start `planning-scribe` from Claude in the Git repository being planned. The
    skill attaches that repository to the active call and learns Scribe's
    internal notes path.
