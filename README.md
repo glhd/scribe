@@ -1,146 +1,195 @@
 # Scribe
 
-Scribe is a desktop companion for the `planning-scribe` Claude skill. During a
-Tuple planning call it gives Claude one visible voice, renders the live notes,
-and lets the room approve or reject decisions without adding another text input.
+Scribe is a macOS desktop companion for a Claude `planning-scribe` skill. It
+owns the live session for the current Tuple call, gives Claude a visible review
+stream, and renders an internal Markdown handoff as Claude edits it.
 
-The app is deliberately file-based. Claude writes through the `scribe` CLI,
-the window watches the files, and a crashed or closed window cannot lose a
-message.
+Scribe does not need a repository-local configuration file or a meaningful
+process working directory. It writes nothing into a project until the user
+chooses **Save As…** for a finished handoff.
 
-## Configure a call
+## Installed-app workflow
 
-Create `.scribe.json` in the repository Claude is working in:
+1. Install Scribe in Applications and open it. With no call, it waits and
+   detects the next Tuple call without a restart.
+2. Start transcription in Tuple when wanted. Scribe never starts or restarts
+   transcription. If transcription stops during a call, Scribe reports the gap.
+3. On first use, choose **Install Claude integration**. This installs the
+   `planning-scribe` skill and a stable CLI shim at `~/.scribe/bin/scribe`; no
+   shell `PATH` edits are needed.
+4. Start `planning-scribe` from Claude in the Git repository being planned. The
+   skill attaches that repository to the active call and learns Scribe's
+   internal notes path.
+5. After Tuple reports that the call ended, Claude performs its final notes pass
+   and finishes the session. Scribe presents **Plan ready** with **Copy** and
+   native **Save As…** actions. Save As copies the internal handoff; it does not
+   move it.
 
-```json
-{
-  "call": "retry-placement"
-}
-```
+The Tuple call ID is the Scribe session ID. There is no active-call picker.
+History is for opening recent Scribe sessions and recovering unsaved handoffs.
 
-`basePath` defaults to `docs`, producing these sidecars:
+Tuple's CLI must be installed from Tuple Settings → Integrations → CLI Server.
+Scribe checks `/usr/local/bin/tuple`, `/opt/homebrew/bin/tuple`, and then its own
+`PATH`, so a Finder-launched app does not depend on a shell working directory.
+
+## Storage and privacy
+
+SQLite is the single operational source of truth:
 
 ```text
-docs/retry-placement.md
-docs/retry-placement.chat.jsonl
-docs/retry-placement.events.jsonl
+~/.scribe/
+  scribe.db
+  bin/scribe
+  sessions/<tuple-call-id>/notes.md
 ```
 
-Change the base directory without changing the app:
+The database uses WAL, transactions, schema migrations, and a busy timeout so
+the GUI can read while the CLI writes. It stores session state, normalized
+source events and source health, Claude chat, decision reviews, file references,
+Chronicle matches, and durable per-consumer cursors. The real internal
+`notes.md` is the only non-database session document because Claude edits it and
+the renderer watches it.
 
-```json
-{
-  "call": "retry-placement",
-  "basePath": "planning"
-}
-```
+There are no project chat, transcript, event, or notes sidecars. Scribe has no
+normal raw-transcript or Claude-chat export. A finished handoff is the only
+normal export, and only an explicit Save As can put it in a project. File
+references retain the Git `HEAD` captured when Claude posted them and open the
+current attached-repository file in PhpStorm.
 
-For an arbitrary document path, use `{"document":"path/to/call.md"}`. Paths
-are relative to the config file. `SCRIBE_CONFIG` selects another config file and
-`SCRIBE_NOTES` overrides configuration with an explicit markdown path. The app
-and CLI must run inside the document's Git repository so file references can be
-stamped and opened safely.
+The latest five complete/interrupted sessions keep their full operational,
+source, and chat data; active and finalizing sessions are always retained.
+Older terminal-session operational data is pruned. Scribe keeps the latest five
+internal handoffs and also protects any older handoff that has never been saved
+externally, surfacing it in History for Save or Delete. A content hash tracks
+the last Save As, so subsequent edits make a handoff unsaved again. Cleanup only
+removes Scribe-owned internal files and never touches an exported destination.
 
-## Run
+Stale active sessions become interrupted after restart and remain recoverable.
+
+For isolated development/tests, `SCRIBE_HOME` can replace `~/.scribe`. Normal
+installed use intentionally has one stable CLI-discoverable location.
+
+## CLI contract
+
+The installed skill uses the absolute shim path, but examples below abbreviate
+it as `scribe`:
 
 ```bash
-npm install
-npm run tauri dev
+scribe session attach --repo "$PWD"
+scribe session current --json
+scribe tick --wait --cursor planning-scribe --timeout 30s --limit 200
+scribe session finish
 ```
 
-Build the distributable app with `npm run tauri build`. The resulting `scribe`
-executable is both the desktop entry point and the CLI: with no subcommand it
-opens the window; with a subcommand it writes the sidecars directly.
+`session attach` resolves the canonical Git root and returns JSON containing the
+session ID, absolute internal `notesPath`, attached repository, state, and source
+health. It never changes the notes path. `tick` performs source collection,
+normalization, filtering, deduplication, chronological batch ordering, and a
+transactional durable cursor for the named consumer. A late source event is
+delivered once with its original `occurredAt`; the skill never parses SQLite,
+Tuple, or Chronicle storage itself.
 
-Release builds check the latest GitHub release on startup. When a newer signed
-version exists, Scribe downloads and installs it automatically, then relaunches
-on macOS and Linux. The Windows installer handles its own relaunch.
-
-## CLI
+Visible chat and review commands bind to the active/finalizing Scribe session:
 
 ```bash
 scribe say "The job already sets **tries** to `1`." \
   --ref-heading "Decisions>Retry placement" \
   --ref-snippet "Retries live in the job"
 
-scribe ack "Chris asked me to add docx to the export formats. Working on that now."
+scribe ack "I’m checking the export path."
 
 scribe decision "Retries live in the job, not the client." \
-  --id retry-placement
+  --id retry-placement \
+  --file app/Jobs/SyncRefundsJob.php:14
 
 scribe unlink <message-id>
 scribe read [<message-id>]
 ```
 
-`say` and `decision` accept one document locator. Both locator options are
-required together, and heading levels are separated with `>`.
+`say` and `decision` require `--ref-heading` and `--ref-snippet` together when
+using a note reference. `--file` accepts repository-relative
+`path[:line[-end]]`; backticked paths are inferred. Errors are readable on
+stderr and exit nonzero. CLI writes do not depend on the GUI being available.
 
-File references can be passed explicitly and may include a line or range:
+Run `scribe --help` for the complete syntax.
+
+## Tuple source
+
+Scribe discovers the active call with:
+
+```text
+tuple call current --format json
+```
+
+It consumes machine-readable transcription and lifecycle records with Tuple's
+durable per-call `scribe-<call-id>` cursor. The initial read catches up backlog,
+processes serialize through a per-call lock, and restarts do not create gaps or
+repeats. Speech occurrence time is the spoken/start time, not transcription
+completion. Tuple's explicit `call_ended` moves Scribe to `finalizing`;
+`recording_ended` only reports that transcription stopped.
+
+## Optional Chronicle source
+
+Scribe implements the Chronicle schema-1 wire contract documented in the
+[authoritative Scribe integration document](https://ampcode.com/user-content/attachments/9f979b70d160dbf20495310a44bf9b582071b3128613b806cde810d7d23852bd-scribe-integration.md).
+It reads the atomic `sessions.json` registry and ignores `sessions.json.lock`.
+It never looks for `current.json`.
+
+Scribe resolves the Chronicle root in this order:
+
+1. the Chronicle folder explicitly selected in Scribe and persisted in
+   `scribe.db`;
+2. `CHRONICLE_HOME` inherited by the Scribe process;
+3. `~/.chronicle`.
+
+The default is detected without prompting. **Choose Chronicle folder** appears
+when no registry is found and remains available under Sources for a deliberate
+override. A Finder-launched Scribe cannot inspect PhpStorm's
+`-Dchronicle.home`, and it may not inherit a shell-only `CHRONICLE_HOME`; select
+the matching root once in that situation. Once the root is known,
+`sessions.json` supplies absolute log paths.
+
+After the planning skill attaches a repository, Scribe matches its canonical
+Git root against every `session.repositories[].root`, then prefers active and
+time-overlapping sessions. Equally good matches require explicit selection.
+Chronicle owns the `active`, `completed`, and `interrupted` states, including
+stale PID/heartbeat demotion.
+
+Scribe safely tails the selected absolute UTF-8 append-only JSONL log, defers a
+possibly truncated final line, and treats malformed complete records as source
+errors. It validates schema/version, IDs, gapless per-session sequence,
+millisecond UTC timestamps, event data, and path rules; deduplicates by event ID
+and source sequence; imports normalized records into SQLite; and merges by
+`occurredAt`, never append order. `redacted: true` marks selected/snippet text as
+untrusted while preserving accurate paths and ranges. `audio_transcription` is
+rejected because Chronicle never emits it in Scribe mode.
+
+Chronicle owns and prunes its registry/logs. Scribe never modifies or deletes
+them; Scribe retention applies only to imported SQLite records.
+
+## Development and verification
 
 ```bash
-scribe say "`app/Jobs/SyncRefundsJob.php:14` already sets the retry count." \
-  --file app/Jobs/SyncRefundsJob.php:14
+npm install
+npm run tauri dev
 ```
 
-Backticked repository-relative paths in message text are detected automatically,
-so `--file` is only needed when the path is not written literally. The CLI
-resolves `HEAD` and stores the full commit SHA in the message record. Any failure
-is printed to stderr and exits non-zero.
+Build the frontend with `npm run build` and the app with
+`npm run tauri build`. Rust checks live under `src-tauri`:
 
-## Markdown contracts
-
-Claude owns the notes document. A decision entry uses an invisible stable ID and
-a visible, greppable status line:
-
-```markdown
-### Retry placement
-<!-- scribe-decision: retry-placement -->
-**Chose:** Retries live in the job, not the client
-**Because:** The client is shared with the sync path
-**Ruled out:** Middleware — adds a layer for one call site
-**Touches:** `app/Jobs/SyncRefundsJob.php:14` @a1b2c3d
-**Status:** unreviewed
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
 
-The skill changes `**Status:**` to `approved` or `rejected` after consuming the
-corresponding app event. It should append the short SHA after every document file
-reference. Scribe hides that suffix in the rendered pane, shows it on hover, and
-opens the current file through `phpstorm://open`.
+Release builds check GitHub releases through Tauri's updater. Creating releases,
+tags, and updater artifacts is intentionally separate from this architecture.
 
-## JSONL contracts
+## Compatibility
 
-The chat log contains one complete message object per line. New messages append;
-`unlink`, `read`, and decision review atomically rewrite the file so each ID still
-has exactly one current record.
-
-```json
-{"id":"retry-placement","kind":"decision","timestamp":"2026-08-31T12:00:00.000Z","text":"Retries live in the job.","reference":{"heading":["Decisions","Retry placement"],"snippet":"Retries live in the job"},"files":[{"path":"app/Jobs/SyncRefundsJob.php","line":14,"sha":"a1b2c3d..."}],"read":false,"decisionStatus":"unreviewed"}
-```
-
-The event log is append-only and uses the same timestamps as the transcript and
-Chronicle logs:
-
-```json
-{"timestamp":"2026-08-31T12:01:00.000Z","type":"decision_approved","decisionId":"retry-placement"}
-{"timestamp":"2026-08-31T12:02:00.000Z","type":"decision_rejected","decisionId":"retry-placement"}
-{"timestamp":"2026-08-31T12:03:00.000Z","type":"reference_stale","messageId":"<message-id>","locator":{"heading":["Decisions","Retry placement"],"snippet":"Retries live in the job"}}
-```
-
-The planning skill's `tick.sh` should read `<call>.events.jsonl` incrementally,
-merge these records by `timestamp` with speech and IDE events, and persist its
-event cursor in the existing state directory. A `reference_stale` record calls
-for `scribe unlink`; decision records call for updating the matching markdown
-entry's `**Status:**` line.
-
-## Releases
-
-Versions are kept in `package.json`, `src-tauri/Cargo.toml`, and
-`src-tauri/tauri.conf.json`. Pushing a matching `v<version>` tag runs the release
-workflow for macOS (universal), Linux x86-64, and Windows x86-64. The workflow
-publishes installers, signed updater bundles, and `latest.json` to the GitHub
-release. It requires the repository secret `TAURI_SIGNING_PRIVATE_KEY`; Apple
-signing and notarization secrets are optional, with ad-hoc signing used when
-they are absent. To notarize, configure the complete set `APPLE_CERTIFICATE`,
-`APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_ISSUER`, `APPLE_API_KEY`, and
-`APPLE_API_KEY_CONTENT`. The last secret contains the complete raw App Store
-Connect `.p8` private key; the workflow writes it to `APPLE_API_KEY_PATH`.
+The old cwd-driven `.scribe.json`, `SCRIBE_CONFIG`, `SCRIBE_NOTES`, and
+repository Markdown/JSONL sidecar workflow is intentionally removed. Existing
+project sidecars are left untouched but are not imported. They cannot safely
+represent one installed app session shared by concurrent GUI and CLI processes;
+SQLite and the internal handoff replace that ownership model.

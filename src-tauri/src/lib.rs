@@ -1,50 +1,32 @@
 pub mod cli;
+mod integration;
 mod model;
+mod sources;
 mod storage;
 
-use std::{
-    fs,
-    path::Path,
-    sync::Mutex,
-    thread,
-    time::{Duration, SystemTime},
-};
+use std::{path::PathBuf, sync::Mutex, thread, time::Duration};
 
+use chrono::Duration as ChronoDuration;
 use model::{AppSnapshot, DecisionStatus, DocumentReference, MessageKind};
-use storage::SessionPaths;
+use sources::TupleClient;
+use storage::{SessionRecord, Store};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
 struct RuntimeState {
-    session: Result<SessionPaths, String>,
+    store: Result<Store, String>,
     update_guard: Mutex<()>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FileFingerprint {
-    exists: bool,
-    modified: Option<SystemTime>,
-    length: u64,
-}
-
-fn fingerprint(path: &Path) -> FileFingerprint {
-    match fs::metadata(path) {
-        Ok(metadata) => FileFingerprint {
-            exists: true,
-            modified: metadata.modified().ok(),
-            length: metadata.len(),
-        },
-        Err(_) => FileFingerprint {
-            exists: false,
-            modified: None,
-            length: 0,
-        },
+impl RuntimeState {
+    fn store(&self) -> Result<&Store, String> {
+        self.store.as_ref().map_err(Clone::clone)
     }
 }
 
 #[tauri::command]
 fn get_state(state: State<'_, RuntimeState>) -> Result<AppSnapshot, String> {
-    storage::snapshot(state.session.as_ref().map_err(Clone::clone)?)
+    state.store()?.snapshot()
 }
 
 #[tauri::command]
@@ -57,9 +39,10 @@ fn mark_read(
         .update_guard
         .lock()
         .map_err(|_| "app state lock was poisoned".to_string())?;
-    let session = state.session.as_ref().map_err(Clone::clone)?;
-    storage::mark_read_through(session, through_id.as_deref())?;
-    refresh(&app, session)
+    let store = state.store()?;
+    let session = selected_session(store)?;
+    store.mark_read_through(&session.id, through_id.as_deref())?;
+    refresh(&app, store)
 }
 
 #[tauri::command]
@@ -73,9 +56,10 @@ fn review_decision(
         .update_guard
         .lock()
         .map_err(|_| "app state lock was poisoned".to_string())?;
-    let session = state.session.as_ref().map_err(Clone::clone)?;
-    storage::review_decision(session, &id, status)?;
-    refresh(&app, session)
+    let store = state.store()?;
+    let session = selected_session(store)?;
+    store.review_decision(&session.id, &id, status)?;
+    refresh(&app, store)
 }
 
 #[tauri::command]
@@ -84,8 +68,9 @@ fn report_stale_reference(
     locator: DocumentReference,
     state: State<'_, RuntimeState>,
 ) -> Result<(), String> {
-    let session = state.session.as_ref().map_err(Clone::clone)?;
-    storage::report_stale_reference(session, &message_id, &locator)
+    let store = state.store()?;
+    let session = selected_session(store)?;
+    store.report_stale_reference(&session.id, &message_id, &locator)
 }
 
 #[tauri::command]
@@ -94,9 +79,12 @@ fn open_file_reference(
     line: Option<u32>,
     state: State<'_, RuntimeState>,
 ) -> Result<(), String> {
-    let session = state.session.as_ref().map_err(Clone::clone)?;
+    let session = selected_session(state.store()?)?;
+    let repo = session
+        .repo
+        .ok_or_else(|| "planning-scribe has not attached a repository".to_string())?;
     let relative = storage::parse_file_spec(&path)?.0;
-    let absolute = session.repo.join(relative);
+    let absolute = repo.join(relative);
     let mut url = url::Url::parse("phpstorm://open")
         .map_err(|error| format!("cannot build PhpStorm URL: {error}"))?;
     {
@@ -110,8 +98,89 @@ fn open_file_reference(
         .map_err(|error| format!("cannot open file in PhpStorm: {error}"))
 }
 
-fn refresh(app: &tauri::AppHandle, session: &SessionPaths) -> Result<(), String> {
-    let snapshot = storage::snapshot(session)?;
+#[tauri::command]
+fn select_session(
+    id: String,
+    state: State<'_, RuntimeState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let store = state.store()?;
+    store.select_session(&id)?;
+    refresh(&app, store)
+}
+
+#[tauri::command]
+fn delete_session(
+    id: String,
+    state: State<'_, RuntimeState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let store = state.store()?;
+    store.delete_session(&id)?;
+    refresh(&app, store)
+}
+
+#[tauri::command]
+fn select_chronicle(
+    id: String,
+    state: State<'_, RuntimeState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let store = state.store()?;
+    let session = selected_session(store)?;
+    store.select_chronicle(&session.id, &id)?;
+    sources::collect_chronicle(store, &session)?;
+    refresh(&app, store)
+}
+
+#[tauri::command]
+fn choose_chronicle_folder(
+    path: String,
+    state: State<'_, RuntimeState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let store = state.store()?;
+    let root = PathBuf::from(path);
+    sources::validate_chronicle_root(&root)?;
+    store.set_chronicle_root(&root)?;
+    if let Some(session) = store.current_session()? {
+        sources::discover_chronicle(store, &session)?;
+        sources::collect_chronicle(store, &session)?;
+    }
+    refresh(&app, store)
+}
+
+#[tauri::command]
+fn export_notes(
+    destination: String,
+    state: State<'_, RuntimeState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let store = state.store()?;
+    let session = selected_session(store)?;
+    store.export_notes(&session.id, &PathBuf::from(destination))?;
+    refresh(&app, store)
+}
+
+#[tauri::command]
+fn install_claude_integration(
+    state: State<'_, RuntimeState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let store = state.store()?;
+    let skill = integration::install(store)?;
+    refresh(&app, store)?;
+    Ok(skill.to_string_lossy().into_owned())
+}
+
+fn selected_session(store: &Store) -> Result<SessionRecord, String> {
+    store
+        .selected_session()?
+        .ok_or_else(|| "no Scribe session is selected".to_string())
+}
+
+fn refresh(app: &tauri::AppHandle, store: &Store) -> Result<(), String> {
+    let snapshot = store.snapshot()?;
     set_badge(app, &snapshot);
     app.emit("state_changed", snapshot)
         .map_err(|error| format!("cannot update app window: {error}"))
@@ -130,22 +199,21 @@ fn set_badge(app: &tauri::AppHandle, snapshot: &AppSnapshot) {
     }
 }
 
-fn start_watcher(app: tauri::AppHandle, session: SessionPaths) {
+fn start_collector(app: tauri::AppHandle, store: Store) {
     thread::spawn(move || {
-        let mut notes = fingerprint(&session.notes);
-        let mut chat = fingerprint(&session.chat);
+        let tuple = TupleClient::discover();
+        let mut previous = None;
         loop {
-            thread::sleep(Duration::from_millis(300));
-            let next_notes = fingerprint(&session.notes);
-            let next_chat = fingerprint(&session.chat);
-            if notes != next_notes || chat != next_chat {
-                notes = next_notes;
-                chat = next_chat;
-                // Atomic rewrites and rapid editor saves can produce two adjacent
-                // changes. A short settle period prevents rendering the transient one.
-                thread::sleep(Duration::from_millis(50));
-                let _ = refresh(&app, &session);
+            let _ = sources::collect_once(&store, &tuple, "2s");
+            if let Ok(snapshot) = store.snapshot() {
+                let fingerprint = serde_json::to_string(&snapshot).ok();
+                if fingerprint != previous {
+                    set_badge(&app, &snapshot);
+                    let _ = app.emit("state_changed", snapshot);
+                    previous = fingerprint;
+                }
             }
+            thread::sleep(Duration::from_millis(500));
         }
     });
 }
@@ -154,7 +222,6 @@ fn start_updater(app: tauri::AppHandle) {
     if cfg!(debug_assertions) {
         return;
     }
-
     tauri::async_runtime::spawn(async move {
         let updater = match app.updater() {
             Ok(updater) => updater,
@@ -171,14 +238,10 @@ fn start_updater(app: tauri::AppHandle) {
                 return;
             }
         };
-
         if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
             eprintln!("cannot install update: {error}");
             return;
         }
-
-        // The Windows installer exits and relaunches Scribe itself. macOS and
-        // Linux replace the app in place and need the running process restarted.
         #[cfg(not(target_os = "windows"))]
         app.restart();
     });
@@ -186,12 +249,18 @@ fn start_updater(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let session = storage::resolve_session();
+    let store = Store::open();
+    if let Ok(store) = &store {
+        let _ = store.interrupt_stale_sessions(ChronoDuration::hours(12));
+        let _ = store.prune();
+        let _ = store.clear_terminal_selection_for_launch();
+    }
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(RuntimeState {
-            session,
+            store,
             update_guard: Mutex::new(()),
         })
         .invoke_handler(tauri::generate_handler![
@@ -199,14 +268,20 @@ pub fn run() {
             mark_read,
             review_decision,
             report_stale_reference,
-            open_file_reference
+            open_file_reference,
+            select_session,
+            delete_session,
+            select_chronicle,
+            choose_chronicle_folder,
+            export_notes,
+            install_claude_integration,
         ])
         .setup(|app| {
-            if let Ok(session) = app.state::<RuntimeState>().session.clone() {
-                if let Ok(snapshot) = storage::snapshot(&session) {
+            if let Ok(store) = app.state::<RuntimeState>().store.clone() {
+                if let Ok(snapshot) = store.snapshot() {
                     set_badge(app.handle(), &snapshot);
                 }
-                start_watcher(app.handle().clone(), session);
+                start_collector(app.handle().clone(), store);
             }
             start_updater(app.handle().clone());
             Ok(())

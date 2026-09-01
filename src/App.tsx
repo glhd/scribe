@@ -8,6 +8,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   InlineMarkdown,
   MarkdownDocument,
@@ -23,7 +24,9 @@ import type {
   ChatMessage,
   DecisionStatus,
   DocumentReference,
+  SessionSummary,
   ScribeState,
+  SourceHealth,
 } from "./types";
 import "./App.css";
 
@@ -125,18 +128,6 @@ function formatTime(timestamp: string): { short: string; full: string } {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return { short: timestamp, full: timestamp };
   return { short: timeFormatter.format(date), full: date.toLocaleString() };
-}
-
-function relativeNotesPath(notesPath: string, repoPath: string): string {
-  const normalizedRepo = repoPath.replace(/[\\/]$/, "");
-  if (
-    normalizedRepo &&
-    notesPath.startsWith(normalizedRepo) &&
-    /[\\/]/.test(notesPath.slice(normalizedRepo.length, normalizedRepo.length + 1))
-  ) {
-    return notesPath.slice(normalizedRepo.length + 1);
-  }
-  return notesPath || "Notes";
 }
 
 type SavedMarkdownScroll =
@@ -355,6 +346,161 @@ function LoadingShell() {
   );
 }
 
+function SourceStrip({ sources }: { sources: SourceHealth[] }) {
+  return (
+    <div aria-label="Session sources" className="source-status-strip" role="status">
+      {sources.map((source) => (
+        <span className={`source-status is-${source.status}`} key={source.source} title={source.detail ?? undefined}>
+          <span className="source-name">{source.source}</span>
+          <span aria-hidden="true" className="source-dot" />
+          <span>{source.label}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function sessionLabel(session: SessionSummary): string {
+  const date = new Date(session.startedAt);
+  const when = Number.isNaN(date.getTime()) ? session.startedAt : date.toLocaleString();
+  return `${when} · ${session.state}`;
+}
+
+function SessionHistory({
+  sessions,
+  currentId,
+  onSelect,
+  onDelete,
+}: {
+  sessions: SessionSummary[];
+  currentId?: string | null;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (sessions.length === 0) return null;
+  return (
+    <details className="history-menu">
+      <summary>History</summary>
+      <div className="history-popover">
+        <strong>Recent sessions</strong>
+        {sessions.map((session) => (
+          <div className={session.id === currentId ? "history-row is-current" : "history-row"} key={session.id}>
+            <button onClick={() => onSelect(session.id)} type="button">
+              <span>{sessionLabel(session)}</span>
+              <code>{session.id}</code>
+              {session.hasUnsavedHandoff && <em>Unsaved handoff</em>}
+            </button>
+            {(session.state === "complete" || session.state === "interrupted") && (
+              <button
+                aria-label={`Delete session ${session.id}`}
+                className="history-delete"
+                onClick={() => onDelete(session.id)}
+                title="Delete Scribe-owned session data"
+                type="button"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function ChronicleSettings({
+  root,
+  found,
+  choosing,
+  onChoose,
+}: {
+  root: string;
+  found: boolean;
+  choosing: boolean;
+  onChoose: () => void;
+}) {
+  return (
+    <details className="settings-menu">
+      <summary>Sources</summary>
+      <div className="settings-popover">
+        <strong>Chronicle</strong>
+        <span>{found ? "Registry detected" : "Registry not detected"}</span>
+        <code title={root}>{root}</code>
+        <button disabled={choosing} onClick={onChoose} type="button">
+          {choosing ? "Choosing…" : "Choose Chronicle folder…"}
+        </button>
+      </div>
+    </details>
+  );
+}
+
+function ChronicleFolderNotice({
+  choosing,
+  onChoose,
+}: {
+  choosing: boolean;
+  onChoose: () => void;
+}) {
+  return (
+    <div className="chronicle-folder-notice" role="status">
+      <span>Chronicle registry not detected. Chronicle is optional.</span>
+      <button disabled={choosing} onClick={onChoose} type="button">
+        {choosing ? "Choosing…" : "Choose Chronicle folder"}
+      </button>
+    </div>
+  );
+}
+
+function WaitingForCall({
+  state,
+  installing,
+  choosingChronicle,
+  error,
+  onInstall,
+  onChooseChronicle,
+  onSelect,
+  onDelete,
+}: {
+  state: ScribeState;
+  installing: boolean;
+  choosingChronicle: boolean;
+  error?: string | null;
+  onInstall: () => void;
+  onChooseChronicle: () => void;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <main className="app-shell app-centered waiting-shell">
+      <div className="waiting-card">
+        <span className="loading-mark"><ScribeMark /></span>
+        <h1>Waiting for a Tuple call…</h1>
+        <p>Join a call in Tuple. Scribe will detect it automatically; start transcription in Tuple when you’re ready.</p>
+        <SourceStrip sources={state.sources} />
+        {!state.chronicleRegistryFound && (
+          <ChronicleFolderNotice choosing={choosingChronicle} onChoose={onChooseChronicle} />
+        )}
+        {error && <div className="waiting-error" role="alert">{error}</div>}
+        {!state.integrationInstalled && (
+          <button className="primary-action" disabled={installing} onClick={onInstall} type="button">
+            {installing ? "Installing…" : "Install Claude integration"}
+          </button>
+        )}
+        {state.sessions.length > 0 && (
+          <div className="waiting-history">
+            <span>Or resume a recent Scribe session</span>
+            <SessionHistory
+              sessions={state.sessions}
+              onDelete={onDelete}
+              onSelect={onSelect}
+            />
+          </div>
+        )}
+      </div>
+    </main>
+  );
+}
+
 function App() {
   const [state, setState] = useState<ScribeState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -363,6 +509,10 @@ function App() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
   const [markingRead, setMarkingRead] = useState(false);
+  const [installingIntegration, setInstallingIntegration] = useState(false);
+  const [copyingNotes, setCopyingNotes] = useState(false);
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [choosingChronicle, setChoosingChronicle] = useState(false);
   const [pendingDecisions, setPendingDecisions] = useState<Record<string, DecisionStatus>>({});
   const [activeReferenceId, setActiveReferenceId] = useState<string | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -558,6 +708,98 @@ function App() {
     }
   }, [markingRead, messages, unreadCount]);
 
+  const installIntegration = useCallback(async () => {
+    if (installingIntegration) return;
+    setActionError(null);
+    setInstallingIntegration(true);
+    try {
+      await invoke("install_claude_integration");
+    } catch (error) {
+      setActionError(`Claude integration was not installed: ${errorMessage(error)}`);
+    } finally {
+      setInstallingIntegration(false);
+    }
+  }, [installingIntegration]);
+
+  const selectSession = useCallback(async (id: string) => {
+    setActionError(null);
+    try {
+      await invoke("select_session", { id });
+    } catch (error) {
+      setActionError(`Could not open that session: ${errorMessage(error)}`);
+    }
+  }, []);
+
+  const deleteSession = useCallback(async (id: string) => {
+    if (!window.confirm("Delete this Scribe session and its internal handoff? Saved copies are not affected.")) return;
+    setActionError(null);
+    try {
+      await invoke("delete_session", { id });
+    } catch (error) {
+      setActionError(`Could not delete that session: ${errorMessage(error)}`);
+    }
+  }, []);
+
+  const selectChronicle = useCallback(async (id: string) => {
+    setActionError(null);
+    try {
+      await invoke("select_chronicle", { id });
+    } catch (error) {
+      setActionError(`Could not attach Chronicle: ${errorMessage(error)}`);
+    }
+  }, []);
+
+  const chooseChronicleFolder = useCallback(async () => {
+    if (!state || choosingChronicle) return;
+    setActionError(null);
+    setChoosingChronicle(true);
+    try {
+      const selection = await open({
+        defaultPath: state.chronicleRoot,
+        directory: true,
+        multiple: false,
+        title: "Choose Chronicle folder",
+      });
+      const path = Array.isArray(selection) ? selection[0] : selection;
+      if (path) await invoke("choose_chronicle_folder", { path });
+    } catch (error) {
+      setActionError(`Could not use that Chronicle folder: ${errorMessage(error)}`);
+    } finally {
+      setChoosingChronicle(false);
+    }
+  }, [choosingChronicle, state]);
+
+  const copyNotes = useCallback(async () => {
+    if (!state || copyingNotes) return;
+    setActionError(null);
+    setCopyingNotes(true);
+    try {
+      await navigator.clipboard.writeText(state.markdown);
+    } catch (error) {
+      setActionError(`Could not copy the handoff: ${errorMessage(error)}`);
+    } finally {
+      setCopyingNotes(false);
+    }
+  }, [copyingNotes, state]);
+
+  const saveNotes = useCallback(async () => {
+    if (!state?.sessionId || savingNotes) return;
+    setActionError(null);
+    setSavingNotes(true);
+    try {
+      const destination = await save({
+        defaultPath: "planning-handoff.md",
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+        title: "Save planning handoff",
+      });
+      if (destination) await invoke("export_notes", { destination });
+    } catch (error) {
+      setActionError(`Could not save the handoff: ${errorMessage(error)}`);
+    } finally {
+      setSavingNotes(false);
+    }
+  }, [savingNotes, state?.sessionId]);
+
   if (loading && !state) {
     return <main className="app-shell app-centered"><LoadingShell /></main>;
   }
@@ -575,9 +817,43 @@ function App() {
     );
   }
 
-  const notesPath = relativeNotesPath(state.notesPath, state.repoPath);
-  const notesPathParts = notesPath.split(/[\\/]/);
-  const notesFileName = notesPathParts[notesPathParts.length - 1] || "Notes";
+  if (!state.sessionId) {
+    return (
+      <WaitingForCall
+        choosingChronicle={choosingChronicle}
+        error={actionError}
+        installing={installingIntegration}
+        onChooseChronicle={chooseChronicleFolder}
+        onDelete={deleteSession}
+        onInstall={installIntegration}
+        onSelect={selectSession}
+        state={state}
+      />
+    );
+  }
+
+  const sourceWarning = state.sources.find((source) =>
+    ["stopped", "error", "ambiguous"].includes(source.status),
+  );
+  const modeNotice =
+    state.mode === "waitingTranscription"
+      ? "Call found. Waiting for transcription — start transcription in Tuple."
+      : state.mode === "waitingClaude"
+        ? "Waiting for planning-scribe to attach from a repository."
+        : state.mode === "finalizing"
+          ? "Tuple call ended. Claude is finishing the handoff."
+          : state.mode === "interrupted"
+            ? "This session was interrupted. Review or save the handoff, then delete it when no longer needed."
+            : null;
+  const emptyNotes =
+    state.mode === "waitingTranscription"
+      ? ["Waiting for transcription", "Start transcription in Tuple. Scribe will attach automatically."]
+      : state.mode === "waitingClaude"
+        ? ["Waiting for planning-scribe", "Start planning-scribe from the repository for this call."]
+        : state.mode === "finalizing"
+          ? ["Finalizing the plan", "Claude is making its final notes pass."]
+          : ["No notes yet", "The internal handoff will appear here as planning-scribe writes it."];
+  const planReady = state.mode === "complete" || state.mode === "interrupted";
 
   return (
     <main className="app-shell">
@@ -590,21 +866,67 @@ function App() {
               <span>Review stream</span>
             </div>
           </div>
-          {unreadCount > 0 && (
-            <span aria-label={`${unreadCount} unread messages`} className="unread-count">
-              {unreadCount > 99 ? "99+" : unreadCount}
-            </span>
-          )}
+          <div className="header-actions">
+            {!state.integrationInstalled && (
+              <button
+                className="integration-button"
+                disabled={installingIntegration}
+                onClick={installIntegration}
+                type="button"
+              >
+                {installingIntegration ? "Installing…" : "Install Claude integration"}
+              </button>
+            )}
+            <ChronicleSettings
+              choosing={choosingChronicle}
+              found={state.chronicleRegistryFound}
+              onChoose={chooseChronicleFolder}
+              root={state.chronicleRoot}
+            />
+            <SessionHistory
+              currentId={state.sessionId}
+              onDelete={deleteSession}
+              onSelect={selectSession}
+              sessions={state.sessions}
+            />
+            {unreadCount > 0 && (
+              <span
+                aria-label={`${unreadCount} unread messages`}
+                className="unread-count"
+                role="status"
+              >
+                {unreadCount > 99 ? "99+" : unreadCount}
+              </span>
+            )}
+          </div>
         </header>
 
-        {(liveWarning || actionError) && (
+        <SourceStrip sources={state.sources} />
+
+        {!state.chronicleRegistryFound && (
+          <ChronicleFolderNotice choosing={choosingChronicle} onChoose={chooseChronicleFolder} />
+        )}
+
+        {(actionError || liveWarning || modeNotice || sourceWarning?.detail) && (
           <div className="warning-banner" role="alert">
-            <span>{actionError || liveWarning}</span>
+            <span>{actionError || liveWarning || sourceWarning?.detail || modeNotice}</span>
             {actionError && (
               <button aria-label="Dismiss error" onClick={() => setActionError(null)} type="button">×</button>
             )}
           </div>
         )}
+
+        {state.chronicleCandidates.length > 1 &&
+          state.sources.some((source) => source.source === "chronicle" && source.status === "ambiguous") && (
+            <div className="chronicle-picker" role="group" aria-label="Choose Chronicle session">
+              <span>Chronicle match:</span>
+              {state.chronicleCandidates.map((candidate) => (
+                <button key={candidate.id} onClick={() => selectChronicle(candidate.id)} type="button">
+                  {candidate.projectName} · {new Date(candidate.startedAt).toLocaleTimeString()} · {candidate.state}
+                </button>
+              ))}
+            </div>
+          )}
 
         <div className="message-feed" onScroll={handleFeedScroll} ref={feedRef}>
           {messages.length === 0 ? (
@@ -652,10 +974,22 @@ function App() {
       <section aria-label="Live notes" className="notes-pane">
         <header className="notes-header">
           <div>
-            <span className="section-label">Live notes</span>
-            <h2>{notesFileName}</h2>
+            <span className="section-label">{planReady ? "Plan ready" : "Live notes"}</span>
+            <h2>Planning handoff</h2>
           </div>
-          <span className="notes-path" title={state.notesPath}>{notesPath}</span>
+          {planReady ? (
+            <div className="handoff-actions">
+              {state.handoffSaved && <span className="saved-label"><CheckIcon /> Saved</span>}
+              <button disabled={!state.markdown || copyingNotes} onClick={copyNotes} type="button">
+                {copyingNotes ? "Copying…" : "Copy"}
+              </button>
+              <button className="save-as-button" disabled={!state.markdown || savingNotes} onClick={saveNotes} type="button">
+                {savingNotes ? "Saving…" : "Save As…"}
+              </button>
+            </div>
+          ) : (
+            <span className="notes-path" title={state.notesPath ?? undefined}>Internal notes · notes.md</span>
+          )}
         </header>
         <div className="notes-scroll" ref={notesRef}>
           {state.markdown.trim() ? (
@@ -670,8 +1004,8 @@ function App() {
           ) : (
             <div className="empty-state notes-empty">
               <span aria-hidden="true" className="empty-page">◇</span>
-              <strong>No notes yet</strong>
-              <p>Changes to {notesPath} will appear automatically.</p>
+              <strong>{emptyNotes[0]}</strong>
+              <p>{emptyNotes[1]}</p>
             </div>
           )}
         </div>
