@@ -227,7 +227,7 @@ function PaneResizer({
 
   return (
     <div
-      aria-controls="scribe-messages planning-handoff"
+      aria-controls="scribe-messages planning-handoff-pane"
       aria-label="Resize review and planning panes"
       aria-orientation="vertical"
       aria-valuemax={maximumChatPaneWidth(window.innerWidth)}
@@ -1278,7 +1278,7 @@ function App() {
       <section
         aria-label={planReady ? "Planning handoff" : "Live notes"}
         className="notes-pane"
-        id="planning-handoff"
+        id="planning-handoff-pane"
       >
         <header className="notes-header" data-tauri-drag-region>
           <div className="notes-title" data-tauri-drag-region>
