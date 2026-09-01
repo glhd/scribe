@@ -3,6 +3,7 @@ mod integration;
 mod model;
 mod sources;
 mod storage;
+mod updater;
 
 use std::{path::PathBuf, sync::Mutex, thread, time::Duration};
 
@@ -11,7 +12,6 @@ use model::{AppSnapshot, DecisionStatus, DocumentReference, MessageKind};
 use sources::TupleClient;
 use storage::{SessionRecord, Store};
 use tauri::{Emitter, Manager, State};
-use tauri_plugin_updater::UpdaterExt;
 
 struct RuntimeState {
     store: Result<Store, String>,
@@ -218,35 +218,6 @@ fn start_collector(app: tauri::AppHandle, store: Store) {
     });
 }
 
-fn start_updater(app: tauri::AppHandle) {
-    if cfg!(debug_assertions) {
-        return;
-    }
-    tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
-            Ok(updater) => updater,
-            Err(error) => {
-                eprintln!("cannot initialize automatic updates: {error}");
-                return;
-            }
-        };
-        let update = match updater.check().await {
-            Ok(Some(update)) => update,
-            Ok(None) => return,
-            Err(error) => {
-                eprintln!("cannot check for updates: {error}");
-                return;
-            }
-        };
-        if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
-            eprintln!("cannot install update: {error}");
-            return;
-        }
-        #[cfg(not(target_os = "windows"))]
-        app.restart();
-    });
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let store = Store::open();
@@ -263,8 +234,12 @@ pub fn run() {
             store,
             update_guard: Mutex::new(()),
         })
+        .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
             get_state,
+            updater::get_update_state,
+            updater::check_for_update,
+            updater::install_update,
             mark_read,
             review_decision,
             report_stale_reference,
@@ -283,7 +258,7 @@ pub fn run() {
                 }
                 start_collector(app.handle().clone(), store);
             }
-            start_updater(app.handle().clone());
+            updater::start(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

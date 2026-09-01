@@ -28,6 +28,7 @@ import type {
   SessionSummary,
   ScribeState,
   SourceHealth,
+  UpdateState,
 } from "./types";
 import "./App.css";
 
@@ -178,8 +179,12 @@ function AppIcon({ className }: { className: string }) {
   );
 }
 
-function WindowDragRegion() {
-  return <div aria-hidden="true" className="window-drag-region" data-tauri-drag-region />;
+function WindowTitlebar() {
+  return (
+    <div aria-hidden="true" className="window-titlebar" data-tauri-drag-region>
+      <span data-tauri-drag-region>Scribe</span>
+    </div>
+  );
 }
 
 function ArrowIcon() {
@@ -356,12 +361,53 @@ function SourceStrip({ sources }: { sources: SourceHealth[] }) {
           key={source.source}
           title={source.detail ?? undefined}
         >
-          <span className="source-name">{source.source}</span>
           <span aria-hidden="true" className="source-dot" />
-          <span className="source-label">{source.label}</span>
+          <span className="source-copy">
+            <span className="source-name">{source.source}</span>
+            <span className="source-label">{source.label}</span>
+          </span>
         </span>
       ))}
     </div>
+  );
+}
+
+function UpdateControl({
+  state,
+  onUpdate,
+}: {
+  state: UpdateState | null;
+  onUpdate: () => void;
+}) {
+  if (!state || state.status === "checking" || state.status === "upToDate") return null;
+
+  const busy = state.status === "installing" || state.status === "restarting";
+  const label =
+    state.status === "available"
+      ? "Update"
+      : state.status === "installing"
+        ? "Updating…"
+        : state.status === "restarting"
+          ? "Restarting…"
+          : "Update failed";
+  const description =
+    state.status === "available"
+      ? `Install Scribe ${state.version ?? "update"}`
+      : state.status === "error"
+        ? `${state.error ?? "The update failed."} Retry update.`
+        : label;
+
+  return (
+    <button
+      aria-label={description}
+      className={`update-button is-${state.status}`}
+      disabled={busy}
+      onClick={onUpdate}
+      title={description}
+      type="button"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -505,7 +551,9 @@ function WaitingForCall({
   installing,
   choosingChronicle,
   error,
+  updateState,
   onInstall,
+  onUpdate,
   onChooseChronicle,
   onSelect,
   onDelete,
@@ -514,7 +562,9 @@ function WaitingForCall({
   installing: boolean;
   choosingChronicle: boolean;
   error?: string | null;
+  updateState: UpdateState | null;
   onInstall: () => void;
+  onUpdate: () => void;
   onChooseChronicle: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
@@ -522,9 +572,8 @@ function WaitingForCall({
   const sourceError = state.sources.find((source) => source.status === "error");
   return (
     <main className="app-shell app-centered waiting-shell">
-      <WindowDragRegion />
-      <header className="waiting-titlebar">
-        <h1>Scribe</h1>
+      <WindowTitlebar />
+      <header className="waiting-titlebar" data-tauri-drag-region>
         <div className="header-actions">
           <ChronicleSettings
             choosing={choosingChronicle}
@@ -532,6 +581,7 @@ function WaitingForCall({
             onChoose={onChooseChronicle}
             root={state.chronicleRoot}
           />
+          <UpdateControl onUpdate={onUpdate} state={updateState} />
           {state.sessions.length > 0 && (
             <SessionHistory
               sessions={state.sessions}
@@ -567,6 +617,7 @@ function WaitingForCall({
 
 function App() {
   const [state, setState] = useState<ScribeState | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [loading, setLoading] = useState(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [liveWarning, setLiveWarning] = useState<string | null>(null);
@@ -592,6 +643,38 @@ function App() {
 
   useEffect(() => {
     document.title = "Scribe";
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: UnlistenFn | undefined;
+
+    const connectUpdater = async () => {
+      try {
+        unlisten = await listen<UpdateState>("update_state_changed", (event) => {
+          if (active) setUpdateState(event.payload);
+        });
+        if (!active) {
+          unlisten();
+          return;
+        }
+        const initialState = await invoke<UpdateState>("get_update_state");
+        if (active) setUpdateState(initialState);
+      } catch (error) {
+        if (active) {
+          setUpdateState({
+            error: `Could not read update status: ${errorMessage(error)}`,
+            status: "error",
+          });
+        }
+      }
+    };
+
+    void connectUpdater();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -785,6 +868,27 @@ function App() {
     }
   }, [installingIntegration]);
 
+  const updateApp = useCallback(async () => {
+    if (!updateState) return;
+    const retryingCheck = updateState.status === "error" && !updateState.version;
+    if (updateState.status === "available" || (updateState.status === "error" && updateState.version)) {
+      setUpdateState((current) => current ? { ...current, error: null, status: "installing" } : current);
+    } else if (retryingCheck) {
+      setUpdateState({ status: "checking" });
+    } else {
+      return;
+    }
+    try {
+      await invoke(retryingCheck ? "check_for_update" : "install_update");
+    } catch (error) {
+      setUpdateState({
+        error: `Update request failed: ${errorMessage(error)}`,
+        status: "error",
+        version: updateState.version,
+      });
+    }
+  }, [updateState]);
+
   const selectSession = useCallback(async (id: string) => {
     setActionError(null);
     try {
@@ -865,13 +969,13 @@ function App() {
   }, [savingNotes, state?.sessionId]);
 
   if (loading && !state) {
-    return <main className="app-shell app-centered"><WindowDragRegion /><LoadingShell /></main>;
+    return <main className="app-shell app-centered"><WindowTitlebar /><LoadingShell /></main>;
   }
 
   if (!state) {
     return (
       <main className="app-shell app-centered">
-        <WindowDragRegion />
+        <WindowTitlebar />
         <div className="fatal-error" role="alert">
           <span aria-hidden="true">!</span>
           <h1>Scribe couldn’t open</h1>
@@ -891,8 +995,10 @@ function App() {
         onChooseChronicle={chooseChronicleFolder}
         onDelete={deleteSession}
         onInstall={installIntegration}
+        onUpdate={updateApp}
         onSelect={selectSession}
         state={state}
+        updateState={updateState}
       />
     );
   }
@@ -923,12 +1029,12 @@ function App() {
 
   return (
     <main className={`app-shell mode-${state.mode}`}>
-      <WindowDragRegion />
+      <WindowTitlebar />
       <section aria-label="Scribe messages" className="chat-pane">
-        <header className="app-header">
-          <div className="sidebar-heading">
-            <h1>Review</h1>
-            <span>{planReady ? "Session complete" : "Claude’s stream"}</span>
+        <header className="app-header" data-tauri-drag-region>
+          <div className="sidebar-heading" data-tauri-drag-region>
+            <h1 data-tauri-drag-region>Review</h1>
+            <span data-tauri-drag-region>{planReady ? "Session complete" : "Claude’s stream"}</span>
           </div>
           <div className="header-actions">
             {unreadCount > 0 && (
@@ -1039,6 +1145,7 @@ function App() {
               onChoose={chooseChronicleFolder}
               root={state.chronicleRoot}
             />
+            <UpdateControl onUpdate={updateApp} state={updateState} />
             <SessionHistory
               currentId={state.sessionId}
               onDelete={deleteSession}
@@ -1058,17 +1165,17 @@ function App() {
             type="button"
           >
             <CheckIcon />
-            <span>{markingRead ? "Marking…" : "Mark as read"}</span>
+            <span className="mark-read-label">{markingRead ? "Marking…" : "Mark as read"}</span>
             {unreadCount > 0 && <span className="button-count">{unreadCount}</span>}
           </button>
         </footer>
       </section>
 
       <section aria-label={planReady ? "Planning handoff" : "Live notes"} className="notes-pane">
-        <header className="notes-header">
-          <div className="notes-title">
-            <h2>Planning handoff</h2>
-            <span className="section-label">{planReady ? "Plan ready" : "Live notes"}</span>
+        <header className="notes-header" data-tauri-drag-region>
+          <div className="notes-title" data-tauri-drag-region>
+            <h2 data-tauri-drag-region>Planning handoff</h2>
+            <span className="section-label" data-tauri-drag-region>{planReady ? "Plan ready" : "Live notes"}</span>
           </div>
           {planReady ? (
             <div className="handoff-actions">
@@ -1081,7 +1188,7 @@ function App() {
               </button>
             </div>
           ) : (
-            <span className="notes-path" title={state.notesPath ?? undefined}>Internal notes · notes.md</span>
+            <span className="notes-path" data-tauri-drag-region title={state.notesPath ?? undefined}>Internal notes · notes.md</span>
           )}
         </header>
         <div className="notes-scroll" ref={notesRef}>

@@ -118,11 +118,18 @@ impl TupleClient {
             .output()
             .map_err(|error| tuple_launch_error(&self.executable, error))?;
         if !output.status.success() {
-            let stderr = output_text(&output.stderr);
-            if stderr.to_ascii_lowercase().contains("not in a call") {
+            let diagnostic = tuple_diagnostic(&output);
+            if diagnostic
+                .as_deref()
+                .is_some_and(|detail| detail.to_ascii_lowercase().contains("not in a call"))
+            {
                 return Ok(None);
             }
-            return Err(format!("Tuple could not report the current call: {stderr}"));
+            return Err(tuple_command_error(
+                "checking the current call",
+                "tuple call current --format json",
+                &output,
+            ));
         }
         let value: Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("Tuple returned invalid current-call JSON: {error}"))?;
@@ -172,11 +179,8 @@ impl TupleClient {
             .map_err(|error| tuple_launch_error(&self.executable, error))?;
         FileExt::unlock(&lock).ok();
         if !output.status.success() {
-            let stderr = output_text(&output.stderr);
-            let lower = stderr.to_ascii_lowercase();
-            if lower.contains("transcription")
-                && (lower.contains("not") || lower.contains("no recording"))
-            {
+            let diagnostic = tuple_diagnostic(&output).unwrap_or_default();
+            if capture_is_inactive(&diagnostic) {
                 let previously_started = store
                     .source_state(&session.id, "tuple")?
                     .is_some_and(|state| matches!(state.status.as_str(), "live" | "stopped"));
@@ -194,14 +198,16 @@ impl TupleClient {
                 store.set_source_state(&session.id, "tuple", status, Some(detail), None)?;
                 return Ok(());
             }
-            store.set_source_state(
-                &session.id,
-                "tuple",
-                "error",
-                Some(&format!("Tuple transcription reader failed: {stderr}")),
-                None,
-            )?;
-            return Err(format!("Tuple transcription reader failed: {stderr}"));
+            let error = tuple_command_error(
+                "reading this call's Capture transcript",
+                &format!(
+                    "tuple --format json transcription show {} --wait --timeout {timeout} --with-events --cursor {cursor}",
+                    session.id,
+                ),
+                &output,
+            );
+            store.set_source_state(&session.id, "tuple", "error", Some(&error), None)?;
+            return Err(error);
         }
 
         let batch = parse_tuple_records(&output.stdout);
@@ -1137,20 +1143,137 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
     value
 }
 
-fn output_text(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes).trim().to_string();
-    if text.is_empty() {
-        "unknown error".to_string()
+fn capture_is_inactive(diagnostic: &str) -> bool {
+    let detail = diagnostic.to_ascii_lowercase();
+    if [
+        "not authorized",
+        "unauthorized",
+        "authorization denied",
+        "permission denied",
+        "access denied",
+        "forbidden",
+    ]
+    .iter()
+    .any(|signal| detail.contains(signal))
+    {
+        return false;
+    }
+    [
+        "transcription is not running",
+        "transcription not running",
+        "no transcription",
+        "no recording",
+        "capture is not running",
+        "capture not running",
+        "not transcribing",
+    ]
+    .iter()
+    .any(|signal| detail.contains(signal))
+}
+
+fn tuple_diagnostic(output: &std::process::Output) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) if stderr == stdout => Some(stderr),
+        (false, false) => Some(format!("{stderr} (stdout: {stdout})")),
+        (false, true) => Some(stderr),
+        (true, false) => Some(stdout),
+        (true, true) => None,
+    }
+}
+
+fn tuple_command_error(operation: &str, command: &str, output: &std::process::Output) -> String {
+    let diagnostic = tuple_diagnostic(output);
+    let lower = diagnostic
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let macos_permission = [
+        ("microphone", "Microphone"),
+        ("screen recording", "Screen & System Audio Recording"),
+        ("screen capture", "Screen & System Audio Recording"),
+        ("accessibility", "Accessibility"),
+    ]
+    .iter()
+    .find(|(signal, _)| lower.contains(signal));
+    let explanation = if let Some((_, permission)) = macos_permission.filter(|_| {
+        lower.contains("permission")
+            || lower.contains("denied")
+            || lower.contains("not allowed")
+            || lower.contains("not authorized")
+            || lower.contains("not permitted")
+    }) {
+        format!(
+            "Tuple is missing its macOS {permission} permission. Open System Settings → Privacy & Security → {permission}, allow Tuple, then retry."
+        )
+    } else if [
+        "tuple.sock",
+        "dial unix",
+        "connection refused",
+        "connect: no such file",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal))
+    {
+        "Scribe cannot reach Tuple. Open the Tuple app and make sure it is running.".to_string()
+    } else if [
+        "not authorized",
+        "unauthorized",
+        "authorization denied",
+        "permission denied",
+        "access denied",
+        "forbidden",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal))
+    {
+        "Tuple CLI access is not authorized. Open Tuple Settings → Integrations → CLI Server, allow access, then retry.".to_string()
+    } else if [
+        "not signed in",
+        "not logged in",
+        "is tuple logged in",
+        "no current user",
+        "authentication required",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal))
+    {
+        "Tuple is not signed in. Sign in to the Tuple app, then retry.".to_string()
+    } else if lower.contains("transcription store unavailable") {
+        "Tuple Capture has not been initialized on this Mac. Start Capture once in Tuple, then retry.".to_string()
+    } else if diagnostic.is_none() {
+        "The Tuple CLI returned no diagnostic output. Run the command below in Terminal; if it also fails silently, reopen Tuple and reinstall or re-authorize the CLI Server integration.".to_string()
     } else {
-        text
+        "Tuple returned an unrecognized error. Run the command below in Terminal and use Tuple's exact diagnostic to resolve it.".to_string()
+    };
+    match diagnostic {
+        Some(diagnostic) => format!(
+            "Tuple failed while {operation} ({}). {explanation} Command: `{command}`. Tuple said: {diagnostic}",
+            output.status
+        ),
+        None => format!(
+            "Tuple failed while {operation} ({}). {explanation} Command: `{command}`.",
+            output.status
+        ),
     }
 }
 
 fn tuple_launch_error(path: &Path, error: std::io::Error) -> String {
-    format!(
-        "cannot run Tuple CLI at {}: {error}. Install it from Tuple Settings → Integrations → CLI Server",
-        path.display()
-    )
+    match error.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "Tuple CLI was not found at {}. Open Tuple Settings → Integrations → CLI Server and choose Install CLI.",
+            path.display()
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "Tuple CLI at {} is not executable ({error}). Reinstall it from Tuple Settings → Integrations → CLI Server.",
+            path.display()
+        ),
+        _ => format!(
+            "Tuple CLI at {} could not start ({error}). Open Tuple and reinstall or re-authorize it in Settings → Integrations → CLI Server.",
+            path.display()
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1325,6 +1448,101 @@ exit 1
             .contains("stopped during the call"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn tuple_current_call_accepts_the_public_json_contract() {
+        let test = TestDirectory::new();
+        let tuple = tuple_mock(
+            &test,
+            r#"
+printf '%s\n' '{"call_id":"call-current","transcribing":false}'
+"#,
+        );
+
+        assert_eq!(
+            tuple.current_call().unwrap().as_deref(),
+            Some("call-current")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tuple_current_call_explains_authorization_errors_from_stdout() {
+        let test = TestDirectory::new();
+        let tuple = tuple_mock(
+            &test,
+            r#"
+echo 'authorization denied by Tuple CLI Server'
+exit 1
+"#,
+        );
+
+        let error = tuple.current_call().unwrap_err();
+        assert!(error.contains("Settings → Integrations → CLI Server"));
+        assert!(error.contains("authorization denied by Tuple CLI Server"));
+        assert!(error.contains("exit status: 1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tuple_current_call_preserves_a_silent_failure_and_next_step() {
+        let test = TestDirectory::new();
+        let tuple = tuple_mock(&test, "exit 7");
+
+        let error = tuple.current_call().unwrap_err();
+        assert!(error.contains("returned no diagnostic output"));
+        assert!(error.contains("tuple call current --format json"));
+        assert!(error.contains("exit status: 7"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tuple_transcription_authorization_is_not_misreported_as_capture_off() {
+        let test = TestDirectory::new();
+        let store = Store::open_at(test.0.join("scribe")).unwrap();
+        let session = store.create_or_resume_session("call-mock").unwrap();
+        let tuple = tuple_mock(
+            &test,
+            r#"
+echo 'not authorized to access transcription' >&2
+exit 1
+"#,
+        );
+
+        let error = tuple.collect(&store, &session, "1ms").unwrap_err();
+        assert!(error.contains("CLI access is not authorized"));
+        let health = store.source_health(&session.id).unwrap();
+        let tuple_health = health
+            .iter()
+            .find(|source| source.source == "tuple")
+            .unwrap();
+        assert_eq!(tuple_health.status, "error");
+        assert!(tuple_health
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("not authorized to access transcription"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tuple_transcription_reports_the_specific_macos_permission() {
+        let test = TestDirectory::new();
+        let store = Store::open_at(test.0.join("scribe")).unwrap();
+        let session = store.create_or_resume_session("call-mock").unwrap();
+        let tuple = tuple_mock(
+            &test,
+            r#"
+echo 'microphone permission denied' >&2
+exit 1
+"#,
+        );
+
+        let error = tuple.collect(&store, &session, "1ms").unwrap_err();
+        assert!(error.contains("System Settings → Privacy & Security → Microphone"));
+        assert!(error.contains("microphone permission denied"));
+    }
+
     #[test]
     fn missing_tuple_cli_is_visible_while_waiting_for_a_call() {
         let test = TestDirectory::new();
@@ -1340,11 +1558,7 @@ exit 1
             .find(|source| source.source == "tuple")
             .unwrap();
         assert_eq!(tuple.status, "error");
-        assert!(tuple
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("Install it from Tuple Settings"));
+        assert!(tuple.detail.as_deref().unwrap().contains("Install CLI"));
     }
 
     fn fixture_candidate() -> ChronicleCandidate {

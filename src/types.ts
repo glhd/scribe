@@ -56,6 +56,12 @@ export interface SourceHealth {
   detail?: string | null;
 }
 
+export interface UpdateState {
+  status: "checking" | "upToDate" | "available" | "installing" | "restarting" | "error";
+  version?: string | null;
+  error?: string | null;
+}
+
 export interface SessionSummary {
   id: string;
   state: SessionState;
